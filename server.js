@@ -4,6 +4,7 @@ const http = require('http');
 const cors = require('cors');
 const mongoose = require('mongoose');
 const { Server } = require('socket.io');
+const authRoutes = require('./routes/auth');
 
 const app = express();
 const server = http.createServer(app);
@@ -17,6 +18,7 @@ app.get('/', (req, res) => {
   res.send('Chat Backend is running');
 });
 
+app.use('/auth', authRoutes);
 
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log('MongoDB connected'))
