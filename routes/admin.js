@@ -3,6 +3,7 @@ const User = require('../models/User');
 const Message = require('../models/Message');
 const Conversation = require('../models/Conversation');
 const auth = require('../middelware/auth');
+const bcrypt = require('bcryptjs');
 
 const adminAuth = (req, res, next) => {
   if (req.user.role !== 'admin') {
@@ -110,6 +111,222 @@ router.get('/users', auth, adminAuth, async (req, res) => {
   }
 });
 
+router.post('/users', auth, adminAuth, async (req, res) => {
+  try {
+    const { name, email, password, role, bio, phone, address, preferences } = req.body;
+
+    if (!name || !email || !password) {
+      return res.status(400).json({ message: 'Name, email, and password are required' });
+    }
+
+    if (password.length < 6) {
+      return res.status(400).json({ message: 'Password must be at least 6 characters long' });
+    }
+
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({ message: 'User with this email already exists' });
+    }
+
+    const validRoles = ['admin', 'agent', 'customer', 'designer', 'merchant'];
+    if (role && !validRoles.includes(role)) {
+      return res.status(400).json({ message: 'Invalid role specified' });
+    }
+
+    const userData = {
+      name,
+      email,
+      password,
+      role: role || 'customer',
+      bio: bio || '',
+      phone: phone || '',
+      address: address || {
+        street: '',
+        city: '',
+        state: '',
+        zipCode: '',
+        country: ''
+      },
+      preferences: preferences || {
+        notifications: true,
+        emailNotifications: true,
+        darkMode: false
+      },
+      isActive: true
+    };
+
+    const user = await User.create(userData);
+    const userResponse = await User.findById(user._id).select('-password');
+
+    res.status(201).json({
+      message: 'User created successfully',
+      user: userResponse
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+router.get('/users/:userId', auth, adminAuth, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    const user = await User.findById(userId).select('-password');
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const userStats = {
+      totalMessages: await Message.countDocuments({ senderId: userId }),
+      totalConversations: await Conversation.countDocuments({ participants: userId }),
+      recentMessages: await Message.find({ senderId: userId })
+        .populate('conversationId', 'participants')
+        .sort({ createdAt: -1 })
+        .limit(5)
+    };
+
+    res.json({
+      user,
+      stats: userStats
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.put('/users/:userId', auth, adminAuth, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { name, email, role, bio, phone, address, preferences, isActive } = req.body;
+
+    if (userId === req.user.id && isActive === false) {
+      return res.status(400).json({ message: 'Cannot deactivate your own account' });
+    }
+
+    const updateFields = {};
+    if (name !== undefined) updateFields.name = name;
+    if (email !== undefined) {
+      const existingUser = await User.findOne({ email, _id: { $ne: userId } });
+      if (existingUser) {
+        return res.status(400).json({ message: 'Email already exists' });
+      }
+      updateFields.email = email;
+    }
+    if (role !== undefined) {
+      const validRoles = ['admin', 'agent', 'customer', 'designer', 'merchant'];
+      if (!validRoles.includes(role)) {
+        return res.status(400).json({ message: 'Invalid role specified' });
+      }
+      updateFields.role = role;
+    }
+    if (bio !== undefined) updateFields.bio = bio;
+    if (phone !== undefined) updateFields.phone = phone;
+    if (address !== undefined) updateFields.address = address;
+    if (preferences !== undefined) updateFields.preferences = preferences;
+    if (isActive !== undefined) updateFields.isActive = isActive;
+
+    const user = await User.findByIdAndUpdate(
+      userId,
+      updateFields,
+      { new: true, runValidators: true }
+    ).select('-password');
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    res.json({
+      message: 'User updated successfully',
+      user
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+router.put('/users/:userId/password', auth, adminAuth, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { newPassword } = req.body;
+
+    if (!newPassword) {
+      return res.status(400).json({ message: 'New password is required' });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({ message: 'Password must be at least 6 characters long' });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    user.password = newPassword;
+    await user.save();
+
+    res.json({ message: 'Password updated successfully' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.put('/users/:userId/status', auth, adminAuth, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { isActive } = req.body;
+
+    if (userId === req.user.id && isActive === false) {
+      return res.status(400).json({ message: 'Cannot deactivate your own account' });
+    }
+
+    const user = await User.findByIdAndUpdate(
+      userId,
+      { isActive },
+      { new: true }
+    ).select('-password');
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    res.json({ 
+      message: `User ${isActive ? 'activated' : 'deactivated'} successfully`, 
+      user 
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete('/users/:userId', auth, adminAuth, async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    if (userId === req.user.id) {
+      return res.status(400).json({ message: 'Cannot delete your own account' });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    await Message.deleteMany({ senderId: userId });
+    await Conversation.updateMany(
+      { participants: userId },
+      { $pull: { participants: userId } }
+    );
+    await Conversation.deleteMany({ participants: { $size: 0 } });
+    
+    await User.findByIdAndDelete(userId);
+
+    res.json({ message: 'User and associated data deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.get('/messages', auth, adminAuth, async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
@@ -161,50 +378,6 @@ router.get('/conversations', auth, adminAuth, async (req, res) => {
       currentPage: page,
       total
     });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-router.put('/users/:userId/status', auth, adminAuth, async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const { isActive } = req.body;
-
-    const user = await User.findByIdAndUpdate(
-      userId,
-      { isActive },
-      { new: true }
-    ).select('-password');
-
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-
-    res.json({ message: 'User status updated', user });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-router.delete('/users/:userId', auth, adminAuth, async (req, res) => {
-  try {
-    const { userId } = req.params;
-
-    if (userId === req.user.id) {
-      return res.status(400).json({ message: 'Cannot delete your own account' });
-    }
-
-    await Message.deleteMany({ senderId: userId });
-    await Conversation.updateMany(
-      { participants: userId },
-      { $pull: { participants: userId } }
-    );
-    await Conversation.deleteMany({ participants: { $size: 0 } });
-    
-    await User.findByIdAndDelete(userId);
-
-    res.json({ message: 'User deleted successfully' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

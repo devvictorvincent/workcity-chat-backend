@@ -10,7 +10,9 @@ const connectDB = require('./config/db');
 const conversationRoutes = require('./routes/conversations');
 const messageRoutes = require('./routes/messages');
 const profileRoutes = require('./routes/profile');
+const adminRoutes = require('./routes/admin');
 const Message = require('./models/Message');
+const User = require('./models/User');
 
 const app = express();
 const server = http.createServer(app);
@@ -30,6 +32,7 @@ app.use('/auth', authRoutes);
 app.use('/conversations', conversationRoutes);
 app.use('/messages', messageRoutes);
 app.use('/profile', profileRoutes);
+app.use('/admin', adminRoutes);
 
 const io = new Server(server, {
   cors: { origin: '*' }
@@ -37,13 +40,28 @@ const io = new Server(server, {
 
 const activeUsers = new Map();
 
+const updateUserLastSeen = async (userId) => {
+  try {
+    await User.findByIdAndUpdate(userId, { lastSeen: new Date() });
+  } catch (error) {
+    console.error('Error updating user last seen:', error);
+  }
+};
+
 io.on('connection', (socket) => {
   console.log('🔌 User connected:', socket.id);
 
-  socket.on('user_join', (userId) => {
+  socket.on('user_join', async (userId) => {
     activeUsers.set(userId, socket.id);
     socket.userId = userId;
+    await updateUserLastSeen(userId);
     console.log(`User ${userId} joined`);
+    
+    io.emit('user_status_update', {
+      userId,
+      status: 'online',
+      totalActiveUsers: activeUsers.size
+    });
   });
 
   socket.on('join_conversation', (conversationId) => {
@@ -63,6 +81,7 @@ io.on('connection', (socket) => {
       });
       
       await message.populate('senderId', 'name email role');
+      await updateUserLastSeen(senderId);
       
       io.to(conversationId).emit('receive_message', message);
     } catch (error) {
@@ -85,13 +104,26 @@ io.on('connection', (socket) => {
     });
   });
 
-  socket.on('disconnect', () => {
+  socket.on('disconnect', async () => {
     if (socket.userId) {
       activeUsers.delete(socket.userId);
+      await updateUserLastSeen(socket.userId);
+      
+      io.emit('user_status_update', {
+        userId: socket.userId,
+        status: 'offline',
+        totalActiveUsers: activeUsers.size
+      });
     }
     console.log('User disconnected:', socket.id);
   });
 });
+
+setInterval(async () => {
+  for (const [userId] of activeUsers) {
+    await updateUserLastSeen(userId);
+  }
+}, 60000);
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
